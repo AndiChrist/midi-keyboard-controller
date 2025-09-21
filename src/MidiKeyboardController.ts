@@ -1,7 +1,7 @@
 import * as midi from 'midi';
 import Speaker = require('speaker');
 import chalk from 'chalk';
-import { MidiMessage, KeyInfo, KeyPressHandler } from './types/midi';
+import { MidiMessage, KeyInfo, KeyPressHandler, ControlChangeInfo, ControlChangeHandler } from './types/midi';
 import { MidiUtils } from './utils/midiUtils';
 import { AudioGenerator } from './audio/AudioGenerator';
 
@@ -9,7 +9,9 @@ export class MidiKeyboardController {
     private input: midi.Input;
     private audioGenerator: AudioGenerator;
     private keyHandlers: Map<number, KeyPressHandler> = new Map();
+    private ccHandlers: Map<number, ControlChangeHandler> = new Map();
     private pressedKeys: Set<number> = new Set();
+    private ccValues: Map<number, number> = new Map();
 
     constructor() {
         this.input = new midi.Input();
@@ -40,8 +42,21 @@ export class MidiKeyboardController {
     // Verarbeitet eingehende MIDI-Messages
     private handleMidiMessage(rawMessage: number[]): void {
         const midiMsg = MidiUtils.parseMidiMessage(rawMessage);
-        if (!midiMsg || !MidiUtils.isNoteEvent(midiMsg.status)) return;
+        if (!midiMsg) return;
 
+        // Note Events verarbeiten
+        if (MidiUtils.isNoteEvent(midiMsg.status)) {
+            this.handleNoteEvent(midiMsg);
+        }
+
+        // Control Change Events verarbeiten
+        else if (MidiUtils.isControlChange(midiMsg.status)) {
+            this.handleControlChangeEvent(rawMessage);
+        }
+    }
+
+    // Verarbeitet Note-Events (Tasten)
+    private handleNoteEvent(midiMsg: MidiMessage): void {
         const isPressed = MidiUtils.isNoteOn(midiMsg.status, midiMsg.velocity);
         const keyInfo = MidiUtils.createKeyInfo(midiMsg, isPressed);
 
@@ -64,6 +79,23 @@ export class MidiKeyboardController {
         this.callKeyHandler(keyInfo);
     }
 
+    // Verarbeitet Control Change Events (Drehregler)
+    private handleControlChangeEvent(rawMessage: number[]): void {
+        const ccInfo = MidiUtils.parseControlChange(rawMessage);
+        if (!ccInfo) return;
+
+        // Wert speichern
+        this.ccValues.set(ccInfo.controller, ccInfo.value);
+
+        const knobName = MidiUtils.getKnobName(ccInfo.controller);
+        const percent = MidiUtils.ccValueToPercent(ccInfo.value);
+
+        console.log(chalk.blue(`🎛️  ${knobName}: ${ccInfo.value}/127 (${percent}%)`));
+
+        // Handler für spezifische Controller aufrufen
+        this.callControlChangeHandler(ccInfo);
+    }
+
     // Ruft registrierte Handler für eine Taste auf
     private callKeyHandler(keyInfo: KeyInfo): void {
         const handler = this.keyHandlers.get(keyInfo.note);
@@ -76,16 +108,51 @@ export class MidiKeyboardController {
         }
     }
 
+    // Ruft registrierte Handler für Control Change auf
+    private callControlChangeHandler(ccInfo: ControlChangeInfo): void {
+        const handler = this.ccHandlers.get(ccInfo.controller);
+        if (handler) {
+            try {
+                handler(ccInfo);
+            } catch (error) {
+                console.error(chalk.red(`❌ Fehler in CC-Handler für Controller ${ccInfo.controller}:`), error);
+            }
+        }
+    }
+
     // Registriert Handler für bestimmte MIDI-Noten
     public onKey(note: number, handler: KeyPressHandler): void {
         this.keyHandlers.set(note, handler);
-        console.log(chalk.blue(`🔧 Handler registriert für Note ${note} (${MidiUtils.noteToName(note)})`));
+        console.log(chalk.blue(`🔧 Key-Handler registriert für Note ${note} (${MidiUtils.noteToName(note)})`));
+    }
+
+    // Registriert Handler für bestimmte Control Change Controller
+    public onControlChange(ccNumber: number, handler: ControlChangeHandler): void {
+        this.ccHandlers.set(ccNumber, handler);
+        const knobName = MidiUtils.getKnobName(ccNumber);
+        console.log(chalk.blue(`🔧 CC-Handler registriert für ${knobName} (CC${ccNumber})`));
     }
 
     // Entfernt Handler für eine Note
     public removeKeyHandler(note: number): void {
         this.keyHandlers.delete(note);
-        console.log(chalk.gray(`🗑️  Handler entfernt für Note ${note}`));
+        console.log(chalk.gray(`🗑️  Key-Handler entfernt für Note ${note}`));
+    }
+
+    // Entfernt Handler für einen Controller
+    public removeControlChangeHandler(ccNumber: number): void {
+        this.ccHandlers.delete(ccNumber);
+        console.log(chalk.gray(`🗑️  CC-Handler entfernt für CC${ccNumber}`));
+    }
+
+    // Gibt aktuellen Wert eines Controllers zurück
+    public getControllerValue(ccNumber: number): number | undefined {
+        return this.ccValues.get(ccNumber);
+    }
+
+    // Gibt alle aktuellen Controller-Werte zurück
+    public getAllControllerValues(): Map<number, number> {
+        return new Map(this.ccValues);
     }
 
     // Listet verfügbare MIDI-Eingänge auf
@@ -133,7 +200,7 @@ export class MidiKeyboardController {
             this.input.openPort(selectedPort);
 
             console.log(chalk.green(`✅ Verbunden mit: ${portName}`));
-            console.log(chalk.blue('🎹 Bereit für MIDI-Input! Drücken Sie Tasten auf Ihrem Keyboard.'));
+            console.log(chalk.blue('🎹 Bereit für MIDI-Input! Drücken Sie Tasten und drehen Sie die Knöpfe.'));
 
             return true;
         } catch (error) {
@@ -162,6 +229,8 @@ export class MidiKeyboardController {
     public cleanup(): void {
         this.disconnect();
         this.keyHandlers.clear();
+        this.ccHandlers.clear();
         this.pressedKeys.clear();
+        this.ccValues.clear();
     }
 }
